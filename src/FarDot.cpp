@@ -375,12 +375,12 @@ void HignnModel::FarDot(DeviceDoubleMatrix u, DeviceDoubleMatrix f) {
       auto options = torch::TensorOptions()
                          .dtype(torch::kFloat32)
                          .device(torch::kCUDA, mCudaDevice)
-                         .requires_grad(false);
+                         .requires_grad(true); //change to true
 #else
       auto options = torch::TensorOptions()
                          .dtype(torch::kFloat32)
                          .device(torch::kCPU)
-                         .requires_grad(false);
+                         .requires_grad(true); //change to true
 #endif
       torch::Tensor relativeCoordTensor =
           torch::from_blob(relativeCoordPool.data(), {totalCoord, 3}, options);
