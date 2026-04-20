@@ -268,7 +268,7 @@ void HignnModel::CloseDot(DeviceDoubleMatrix u, DeviceDoubleMatrix f, DeviceDoub
                         dataPtr[9 * (relativeOffset + index) + row * 3 + col] *
                         f(indexJStart + k, col);
                   Kokkos::atomic_add(&u(indexIStart + j, row), sum);
-                  Kokkos::atomic_add(&divM(indexIStart + j, row), divM_pairs_ptr[3 * (relativeOffset + index) + row]);
+                  Kokkos::atomic_add(&divM(indexIStart + j, row), (double) divM_pairs_ptr[3 * (relativeOffset + index) + row]);
                   // Accumulate results to u and divM
                 }
               });
