@@ -1,10 +1,11 @@
 #include <algorithm>
 
 #include "HignnModel.hpp"
+#include "Typedef.hpp"
 
 using namespace std;
 
-void HignnModel::CloseDot(DeviceDoubleMatrix u, DeviceDoubleMatrix f) {
+void HignnModel::CloseDot(DeviceDoubleMatrix u, DeviceDoubleMatrix f, DeviceDoubleMatrix divM) {
   std::chrono::steady_clock::time_point t1 = std::chrono::steady_clock::now();
   // Captures the current time to start measuring elapsed time for performance
   // tracking.
@@ -196,12 +197,12 @@ void HignnModel::CloseDot(DeviceDoubleMatrix u, DeviceDoubleMatrix f) {
     auto options = torch::TensorOptions()
                        .dtype(torch::kFloat32)
                        .device(torch::kCUDA, mCudaDevice)
-                       .requires_grad(false);
+                       .requires_grad(true); //change to true
 #else
     auto options = torch::TensorOptions()
                        .dtype(torch::kFloat32)
                        .device(torch::kCPU)
-                       .requires_grad(false);
+                       .requires_grad(true); //change to true
 #endif
     torch::Tensor relativeCoordTensor =
         torch::from_blob(relativeCoordPool.data(), {totalCoord, 3}, options);
@@ -212,6 +213,18 @@ void HignnModel::CloseDot(DeviceDoubleMatrix u, DeviceDoubleMatrix f) {
         std::chrono::steady_clock::now();
 
     auto resultTensor = mTwoBodyModel.forward(inputs).toTensor();
+
+    std::vector<torch::Tensor> grads;
+    for (int k = 0; k < 9; k++) {
+      auto out = resultTensor.index({torch::indexing::Slice(), k}).sum();
+      auto g = torch::autograd::grad({out}, {relativeCoordTensor}, {}, true, false, false) [0];
+      grads.push_back(g);
+    }
+
+    auto jacobian = torch::stack(grads, 1);
+    auto J = jacobian.reshape({totalCoord, 3, 3, 3});
+    auto divM_pairs = J.diagonal(0, 2, 3).sum(-1);
+    auto divM_pairs_ptr = divM_pairs.data_ptr<float>();
 
     std::chrono::steady_clock::time_point end =
         std::chrono::steady_clock::now();
@@ -255,7 +268,8 @@ void HignnModel::CloseDot(DeviceDoubleMatrix u, DeviceDoubleMatrix f) {
                         dataPtr[9 * (relativeOffset + index) + row * 3 + col] *
                         f(indexJStart + k, col);
                   Kokkos::atomic_add(&u(indexIStart + j, row), sum);
-                  // Accumulate results to u.
+                  Kokkos::atomic_add(&divM(indexIStart + j, row), divM_pairs_ptr[3 * (relativeOffset + index) + row]);
+                  // Accumulate results to u and divM
                 }
               });
 
