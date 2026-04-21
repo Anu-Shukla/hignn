@@ -362,7 +362,8 @@ bool HignnModel::CloseFarCheck(HostFloatMatrix aux,
 }
 
 void HignnModel::Dot(pybind11::array_t<float> &uArray,
-                     pybind11::array_t<float> &fArray) {
+                     pybind11::array_t<float> &fArray, 
+                     pybind11::array_t<float> &divMArray) {
   if (mMPIRank == 0)
     std::cout << "start of Dot" << std::endl;
 
@@ -370,9 +371,12 @@ void HignnModel::Dot(pybind11::array_t<float> &uArray,
       std::chrono::high_resolution_clock::now();
 
   auto shape = fArray.shape();
+  
 
   DeviceDoubleMatrix u("u", shape[0], 3);
   DeviceDoubleMatrix f("f", shape[0], 3);
+  DeviceDoubleMatrix divM("divM", shape[0], 3);
+
 
   // initialize u
   Kokkos::parallel_for(
@@ -381,6 +385,16 @@ void HignnModel::Dot(pybind11::array_t<float> &uArray,
         u(i, 0) = 0.0;
         u(i, 1) = 0.0;
         u(i, 2) = 0.0;
+      });
+  Kokkos::fence();
+
+  // initialize divM
+  Kokkos::parallel_for(
+      Kokkos::RangePolicy<Kokkos::DefaultExecutionSpace>(0, divM.extent(0)),
+      KOKKOS_LAMBDA(const int i) {
+        divM(i, 0) = 0.0;
+        divM(i, 1) = 0.0;
+        divM(i, 2) = 0.0;
       });
   Kokkos::fence();
 
@@ -409,7 +423,7 @@ void HignnModel::Dot(pybind11::array_t<float> &uArray,
   Reorder(mReorderedMap, f);
 
   // Compute close- and far-range velocity contributions
-  CloseDot(u, f);
+  CloseDot(u, f, divM);
   FarDot(u, f);
 
   // Copy result velocities back to host
