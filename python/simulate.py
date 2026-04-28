@@ -283,7 +283,7 @@ class Simulator:
         hignn.Finalize()
 
     def velocity_update_wrapper(self, ts, X):
-        V = velocity_update(
+        V, divM = velocity_update(
             self.hignn_model,
             ts,
             X,
