@@ -148,7 +148,8 @@ def velocity_update(
 
     hignn_model.dot(velocity, force, divM)
 
-    return velocity, divM
+    velocity += divM  # TODO: add scale?
+    return velocity
 
 
 class Simulator:
@@ -283,7 +284,7 @@ class Simulator:
         hignn.Finalize()
 
     def velocity_update_wrapper(self, ts, X):
-        V, divM = velocity_update(
+        V = velocity_update(
             self.hignn_model,
             ts,
             X,
@@ -328,4 +329,3 @@ class Simulator:
             )
 
         self.output_counter += 1
-
