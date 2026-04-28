@@ -390,7 +390,7 @@ public:
    * @param f [in] A 2D array of size (num_particles, 3) representing the forces
    * applied to the particles.
    */
-  void FarDot(DeviceDoubleMatrix u, DeviceDoubleMatrix f);
+  void FarDot(DeviceDoubleMatrix u, DeviceDoubleMatrix f, DeviceDoubleMatrix divM);
 
   /**
    * @brief Computes the updated velocities using the original two-body

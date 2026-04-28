@@ -37,7 +37,7 @@ struct reduction_identity<ArrReduce> {
 };
 }  // namespace Kokkos
 
-void HignnModel::FarDot(DeviceDoubleMatrix u, DeviceDoubleMatrix f) {
+void HignnModel::FarDot(DeviceDoubleMatrix u, DeviceDoubleMatrix f, DeviceDoubleMatrix divM) {
   std::chrono::steady_clock::time_point t1 = std::chrono::steady_clock::now();
   // Captures the current time to start measuring elapsed time for performance
   // tracking.
@@ -81,6 +81,7 @@ void HignnModel::FarDot(DeviceDoubleMatrix u, DeviceDoubleMatrix f) {
                               9);  // Pool for C matrices.
   DeviceDoubleMatrix qMatPool("qMatPool", matPoolSize,
                               9);  // Pool for Q matrices.
+  DeviceDoubleMatrix divMMiddlePool("divMMiddlePool", maxWorkNodeSize * maxIter, 3); // Pool for storing summed qGrad (B_k * 1) per node per iteration
   DeviceDoubleVector middleMatPool(
       "middleMatPool",
       middleMatPoolSize * 3);  // Middle matrix pool for accumulation.
@@ -387,7 +388,7 @@ void HignnModel::FarDot(DeviceDoubleMatrix u, DeviceDoubleMatrix f) {
       std::vector<c10::IValue> inputs;
       inputs.push_back(relativeCoordTensor);
 
-      auto resultTensor = mTwoBodyModel.forward(inputs).toTensor();
+      auto resultTensor = mTwoBodyModel.forward(inputs).toTensor(); //NOTE: C matrix computed here
 
       // copy result to CMat
       auto dataPtr = resultTensor.data_ptr<float>();
@@ -700,19 +701,55 @@ void HignnModel::FarDot(DeviceDoubleMatrix u, DeviceDoubleMatrix f) {
       auto options = torch::TensorOptions()
                          .dtype(torch::kFloat32)
                          .device(torch::kCUDA, mCudaDevice)
-                         .requires_grad(false);
+                         .requires_grad(true);
 #else
       auto options = torch::TensorOptions()
                          .dtype(torch::kFloat32)
                          .device(torch::kCPU)
-                         .requires_grad(false);
+                         .requires_grad(true);
 #endif
       torch::Tensor relativeCoordTensor =
           torch::from_blob(relativeCoordPool.data(), {totalCoord, 3}, options);
       std::vector<c10::IValue> inputs;
       inputs.push_back(relativeCoordTensor);
 
-      auto resultTensor = mTwoBodyModel.forward(inputs).toTensor();
+      auto resultTensor = mTwoBodyModel.forward(inputs).toTensor(); //NOTE: Q matrix computed here
+      
+      std::vector<torch::Tensor> grads;
+      for (int k = 0; k < 9; k++) {
+        auto out = resultTensor.index({torch::indexing::Slice(), k}).sum();
+        auto g = torch::autograd::grad({out}, {relativeCoordTensor}, {}, true, false, false) [0];
+        grads.push_back(g);
+      }
+
+      auto jacobian = torch::stack(grads,1);
+      auto J = jacobian.reshape({totalCoord, 3, 3, 3});
+      auto qGrad = J.diagonal(0,2,3).sum(-1);
+      auto qGradPtr = qGrad.data_ptr<float>();
+
+      Kokkos::parallel_for(
+        Kokkos::RangePolicy<Kokkos::DefaultExecutionSpace>(0, workNodeSize),
+        KOKKOS_LAMBDA(const int rank) {
+          const int nodeJ = mFarMatJ(workingNode(rank));
+          const int indexJStart = mClusterTree(nodeJ, 2);
+          const int indexJEnd = mClusterTree(nodeJ, 3);
+          const int workSizeJ = indexJEnd - indexJStart;
+
+          const int relativeOffset = relativeCoordOffset(rank);
+          const int iter = workingNodeIteration(rank) -1;
+          const int poolOffset = rank * maxIter + iter;
+
+          divMMiddlePool(poolOffset, 0) = 0.0;
+          divMMiddlePool(poolOffset, 1) = 0.0;
+          divMMiddlePool(poolOffset, 2) = 0.0;
+
+          for (int j = 0; j < workSizeJ; j++) {
+            for (int d = 0; d < 3; d++) {
+              divMMiddlePool(poolOffset, d) += qGradPtr[3 * (relativeOffset + j) + d];
+            }
+          }
+        });
+      Kokkos::fence(); 
 
       // copy result to QMat
       auto dataPtr = resultTensor.data_ptr<float>();
@@ -1251,7 +1288,7 @@ void HignnModel::FarDot(DeviceDoubleMatrix u, DeviceDoubleMatrix f) {
             const int workSizeI = indexIEnd - indexIStart;
 
             // For each row, for each component, and for each inner iteration,
-            // accumulate contributions to u
+            // accumulate contributions to u and divM
             Kokkos::parallel_for(
                 Kokkos::TeamThreadRange(teamMember,
                                         workSizeI * innerNumIter * 3),
@@ -1271,6 +1308,14 @@ void HignnModel::FarDot(DeviceDoubleMatrix u, DeviceDoubleMatrix f) {
                            middleMatPool(middleMatOffset + 3 * iter + k);
 
                   Kokkos::atomic_add(&u(indexIStart + index, row), sum);
+
+                  //matrix-vector multiply: C * (B_k * 1) for divM
+                  double divMSum = 0.0;
+                  const int divMPoolOffset = workingNodeRank * maxIter + iter;
+                  for (int k = 0; k < 3; k++) {
+                    divMSum += cMatPool(cMatOffset + index, row * 3 + k) * divMMiddlePool(divMPoolOffset, k);
+                  }
+                  Kokkos::atomic_add(&divM(indexIStart + index, row), divMSum);
                 });
           });
       Kokkos::fence();

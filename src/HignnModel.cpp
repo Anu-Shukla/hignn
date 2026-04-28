@@ -401,6 +401,7 @@ void HignnModel::Dot(pybind11::array_t<float> &uArray,
   // Access data from Python arrays
   auto fData = fArray.unchecked<2>();
   auto uData = uArray.mutable_unchecked<2>();
+  auto divMData = divMArray.mutable_unchecked<2>();
 
   // Host mirror for force array
   DeviceDoubleMatrix::HostMirror hostF = Kokkos::create_mirror_view(f);
@@ -424,7 +425,7 @@ void HignnModel::Dot(pybind11::array_t<float> &uArray,
 
   // Compute close- and far-range velocity contributions
   CloseDot(u, f, divM);
-  FarDot(u, f);
+  FarDot(u, f, divM);
 
   // Copy result velocities back to host
   DeviceDoubleMatrix::HostMirror hostU = Kokkos::create_mirror_view(u);
@@ -454,6 +455,26 @@ void HignnModel::Dot(pybind11::array_t<float> &uArray,
         uData(i, 0) = hostU(i, 0);
         uData(i, 1) = hostU(i, 1);
         uData(i, 2) = hostU(i, 2);
+      });
+  Kokkos::fence();
+
+  DeviceDoubleMatrix::HostMirror hostDivM = Kokkos::create_mirror_view(divM);
+  Kokkos::deep_copy(hostDivM, divM);
+  MPI_Allreduce(MPI_IN_PLACE, hostDivM.data(), divM.extent(0) * divM.extent(1), MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+
+  Kokkos::deep_copy(divM, hostDivM);
+
+  BackwardReorder(mReorderedMap, divM);
+
+  Kokkos::deep_copy(hostDivM, divM);
+
+  // Copy divM to Python output array
+  Kokkos::parallel_for(
+      Kokkos::RangePolicy<Kokkos::DefaultHostExecutionSpace>(0, divM.extent(0)),
+      [&](const int i) {
+        divMData(i, 0) = hostDivM(i, 0);
+        divMData(i, 1) = hostDivM(i, 1);
+        divMData(i, 2) = hostDivM(i, 2);
       });
   Kokkos::fence();
 
