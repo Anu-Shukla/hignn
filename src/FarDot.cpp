@@ -1,4 +1,5 @@
 #include "HignnModel.hpp"
+#include <torch/csrc/autograd/grad_mode.h>
 
 // Kokkos reduction for array data
 struct ArrReduce {
