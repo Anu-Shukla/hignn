@@ -204,8 +204,10 @@ void HignnModel::CloseDot(DeviceDoubleMatrix u, DeviceDoubleMatrix f, DeviceDoub
                        .device(torch::kCPU)
                        .requires_grad(true); //change to true
 #endif
+    // .clone() makes PyTorch own a copy of the Kokkos buffer so autograd
+    // doesn't hold a reference to memory Kokkos may reuse next iteration.
     torch::Tensor relativeCoordTensor =
-        torch::from_blob(relativeCoordPool.data(), {totalCoord, 3}, options);
+        torch::from_blob(relativeCoordPool.data(), {totalCoord, 3}, options).clone();
     std::vector<c10::IValue> inputs;
     inputs.push_back(relativeCoordTensor);
 
@@ -217,13 +219,14 @@ void HignnModel::CloseDot(DeviceDoubleMatrix u, DeviceDoubleMatrix f, DeviceDoub
     std::vector<torch::Tensor> grads;
     for (int k = 0; k < 9; k++) {
       auto out = resultTensor.index({torch::indexing::Slice(), k}).sum();
-      auto g = torch::autograd::grad({out}, {relativeCoordTensor}, {}, true, false, false) [0];
+      auto g = torch::autograd::grad({out}, {relativeCoordTensor}, {}, true, false, false)[0];
       grads.push_back(g);
     }
 
     auto jacobian = torch::stack(grads, 1);
     auto J = jacobian.reshape({totalCoord, 3, 3, 3});
-    auto divM_pairs = J.diagonal(0, 2, 3).sum(-1);
+    // .contiguous() ensures sequential memory layout before taking raw pointer.
+    auto divM_pairs = J.diagonal(0, 2, 3).sum(-1).contiguous();
     auto divM_pairs_ptr = divM_pairs.data_ptr<float>();
 
     std::chrono::steady_clock::time_point end =
@@ -234,7 +237,9 @@ void HignnModel::CloseDot(DeviceDoubleMatrix u, DeviceDoubleMatrix f, DeviceDoub
 
     begin = std::chrono::steady_clock::now();
 
-    auto dataPtr = resultTensor.data_ptr<float>();
+    // Store contiguous version to keep tensor alive and ensure sequential layout.
+    auto resultTensor_contiguous = resultTensor.contiguous();
+    auto dataPtr = resultTensor_contiguous.data_ptr<float>();
 
     Kokkos::parallel_for(
         Kokkos::TeamPolicy<Kokkos::DefaultExecutionSpace>(workSize,

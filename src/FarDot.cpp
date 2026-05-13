@@ -384,15 +384,18 @@ void HignnModel::FarDot(DeviceDoubleMatrix u, DeviceDoubleMatrix f, DeviceDouble
                          .device(torch::kCPU)
                          .requires_grad(true); //change to true
 #endif
+      // .clone() makes PyTorch own a copy of the Kokkos buffer so it doesn't
+      // hold a reference to memory Kokkos may reuse next iteration.
       torch::Tensor relativeCoordTensor =
-          torch::from_blob(relativeCoordPool.data(), {totalCoord, 3}, options);
+          torch::from_blob(relativeCoordPool.data(), {totalCoord, 3}, options).clone();
       std::vector<c10::IValue> inputs;
       inputs.push_back(relativeCoordTensor);
 
       auto resultTensor = mTwoBodyModel.forward(inputs).toTensor(); //NOTE: C matrix computed here
 
-      // copy result to CMat
-      auto dataPtr = resultTensor.data_ptr<float>();
+      // Store contiguous version to keep tensor alive and ensure sequential layout.
+      auto resultTensor_contiguous = resultTensor.contiguous();
+      auto dataPtr = resultTensor_contiguous.data_ptr<float>();
 
       // Fill cMatPool with model outputs, enforcing symmetry on non-diagonal
       // elements.
@@ -709,23 +712,26 @@ void HignnModel::FarDot(DeviceDoubleMatrix u, DeviceDoubleMatrix f, DeviceDouble
                          .device(torch::kCPU)
                          .requires_grad(true);
 #endif
+      // .clone() makes PyTorch own a copy of the Kokkos buffer so autograd
+      // doesn't hold a reference to memory Kokkos may reuse next iteration.
       torch::Tensor relativeCoordTensor =
-          torch::from_blob(relativeCoordPool.data(), {totalCoord, 3}, options);
+          torch::from_blob(relativeCoordPool.data(), {totalCoord, 3}, options).clone();
       std::vector<c10::IValue> inputs;
       inputs.push_back(relativeCoordTensor);
 
       auto resultTensor = mTwoBodyModel.forward(inputs).toTensor(); //NOTE: Q matrix computed here
-      
+
       std::vector<torch::Tensor> grads;
       for (int k = 0; k < 9; k++) {
         auto out = resultTensor.index({torch::indexing::Slice(), k}).sum();
-        auto g = torch::autograd::grad({out}, {relativeCoordTensor}, {}, true, false, false) [0];
+        auto g = torch::autograd::grad({out}, {relativeCoordTensor}, {}, true, false, false)[0];
         grads.push_back(g);
       }
 
       auto jacobian = torch::stack(grads,1);
       auto J = jacobian.reshape({totalCoord, 3, 3, 3});
-      auto qGrad = J.diagonal(0,2,3).sum(-1);
+      // .contiguous() ensures sequential memory layout before taking raw pointer.
+      auto qGrad = J.diagonal(0,2,3).sum(-1).contiguous();
       auto qGradPtr = qGrad.data_ptr<float>();
 
       Kokkos::parallel_for(
@@ -753,7 +759,9 @@ void HignnModel::FarDot(DeviceDoubleMatrix u, DeviceDoubleMatrix f, DeviceDouble
       Kokkos::fence(); 
 
       // copy result to QMat
-      auto dataPtr = resultTensor.data_ptr<float>();
+      // Store contiguous version to keep tensor alive and ensure sequential layout.
+      auto resultTensor_contiguous_q = resultTensor.contiguous();
+      auto dataPtr = resultTensor_contiguous_q.data_ptr<float>();
 
       // Copy Q matrix predictions into qMatPool, enforcing symmetry for
       // off-diagonal elements by averaging with their transpose.
