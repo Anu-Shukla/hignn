@@ -217,7 +217,7 @@ void HignnModel::CloseDot(DeviceDoubleMatrix u, DeviceDoubleMatrix f, DeviceDoub
     auto resultTensor = mTwoBodyModel.forward(inputs).toTensor();
 
     DeviceFloatMatrix divMPairs("divMPairs", totalCoord, 3);
-    HostFloatMatrix hostDivMPairs("hostDivMPairs", totalCoord, 3);
+    auto hostDivMPairs = Kokkos::create_mirror_view(divMPairs);
     Kokkos::parallel_for(
         Kokkos::RangePolicy<Kokkos::DefaultHostExecutionSpace>(0,
                                                                totalCoord * 3),
