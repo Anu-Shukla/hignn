@@ -216,25 +216,11 @@ void HignnModel::CloseDot(DeviceDoubleMatrix u, DeviceDoubleMatrix f, DeviceDoub
 
     auto resultTensor = mTwoBodyModel.forward(inputs).toTensor();
 
-    std::vector<torch::Tensor> grads;
-    for (int k = 0; k < 9; k++) {
-      auto out = resultTensor.index({torch::indexing::Slice(), k}).sum();
-      const bool retainGraph = k < 8;
-      auto g = torch::autograd::grad({out}, {relativeCoordTensor}, {},
-                                     retainGraph, false, false)[0];
-      grads.push_back(g);
-    }
-
-    auto jacobian = torch::stack(grads, 1);
-    auto J = jacobian.reshape({totalCoord, 3, 3, 3});
-    // .contiguous() ensures sequential memory layout before taking raw pointer.
-    auto divM_pairs = J.diagonal(0, 2, 3).sum(-1).contiguous();
-    auto divM_pairs_ptr = divM_pairs.data_ptr<float>();
     DeviceFloatMatrix divMPairs("divMPairs", totalCoord, 3);
     Kokkos::parallel_for(
         Kokkos::RangePolicy<Kokkos::DefaultExecutionSpace>(0, totalCoord * 3),
         KOKKOS_LAMBDA(const int i) {
-          divMPairs(i / 3, i % 3) = divM_pairs_ptr[i];
+          divMPairs(i / 3, i % 3) = 0.0;
         });
     Kokkos::fence();
 
