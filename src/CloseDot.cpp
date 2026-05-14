@@ -240,8 +240,19 @@ void HignnModel::CloseDot(DeviceDoubleMatrix u, DeviceDoubleMatrix f, DeviceDoub
       auto gradPtr = grad.data_ptr<float>();
       const int row = k / 3;
       const int col = k % 3;
+      int nonFiniteGradCount = 0;
       for (int i = 0; i < totalCoord; i++) {
-        hostDivMPairs(i, row) += gradPtr[3 * i + col];
+        const float gradValue = gradPtr[3 * i + col];
+        if (std::isfinite(gradValue)) {
+          hostDivMPairs(i, row) += gradValue;
+        } else {
+          nonFiniteGradCount++;
+        }
+      }
+      if (nonFiniteGradCount > 0 && mMPIRank == 0) {
+        std::cout << "CloseDot skipped " << nonFiniteGradCount
+                  << " non-finite divM gradient entries for k=" << k
+                  << std::endl;
       }
     }
     Kokkos::deep_copy(divMPairs, hostDivMPairs);
