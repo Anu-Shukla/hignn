@@ -49,8 +49,6 @@ void HignnModel::FarDot(DeviceDoubleMatrix u, DeviceDoubleMatrix f, DeviceDouble
 
   const int initialFarNodeSize = mFarMatIPtr->extent(0);
   if (initialFarNodeSize == 0) {
-    if (mMPIRank == 0)
-      std::cout << "End of far dot. No far pairs." << std::endl;
     return;
   }
 
