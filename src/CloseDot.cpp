@@ -50,7 +50,6 @@ void HignnModel::CloseDot(DeviceDoubleMatrix u, DeviceDoubleMatrix f, DeviceDoub
   auto &mClusterTree = *mClusterTreePtr;
 
   bool useSymmetry = mUseSymmetry;
-  const bool computeDivM = false;
 
   // Begin processing node pairs in batches
   while (finishedNodeSize < closeNodeSize) {
@@ -217,24 +216,27 @@ void HignnModel::CloseDot(DeviceDoubleMatrix u, DeviceDoubleMatrix f, DeviceDoub
 
     auto resultTensor = mTwoBodyModel.forward(inputs).toTensor();
 
-    const float *divM_pairs_ptr = nullptr;
-    torch::Tensor divM_pairs;
-    if (computeDivM) {
-      std::vector<torch::Tensor> grads;
-      for (int k = 0; k < 9; k++) {
-        auto out = resultTensor.index({torch::indexing::Slice(), k}).sum();
-        const bool retainGraph = k < 8;
-        auto g = torch::autograd::grad({out}, {relativeCoordTensor}, {},
-                                       retainGraph, false, false)[0];
-        grads.push_back(g);
-      }
-
-      auto jacobian = torch::stack(grads, 1);
-      auto J = jacobian.reshape({totalCoord, 3, 3, 3});
-      // .contiguous() ensures sequential memory layout before taking raw pointer.
-      divM_pairs = J.diagonal(0, 2, 3).sum(-1).contiguous();
-      divM_pairs_ptr = divM_pairs.data_ptr<float>();
+    std::vector<torch::Tensor> grads;
+    for (int k = 0; k < 9; k++) {
+      auto out = resultTensor.index({torch::indexing::Slice(), k}).sum();
+      const bool retainGraph = k < 8;
+      auto g = torch::autograd::grad({out}, {relativeCoordTensor}, {},
+                                     retainGraph, false, false)[0];
+      grads.push_back(g);
     }
+
+    auto jacobian = torch::stack(grads, 1);
+    auto J = jacobian.reshape({totalCoord, 3, 3, 3});
+    // .contiguous() ensures sequential memory layout before taking raw pointer.
+    auto divM_pairs = J.diagonal(0, 2, 3).sum(-1).contiguous();
+    auto divM_pairs_ptr = divM_pairs.data_ptr<float>();
+    DeviceFloatMatrix divMPairs("divMPairs", totalCoord, 3);
+    Kokkos::parallel_for(
+        Kokkos::RangePolicy<Kokkos::DefaultExecutionSpace>(0, totalCoord * 3),
+        KOKKOS_LAMBDA(const int i) {
+          divMPairs(i / 3, i % 3) = divM_pairs_ptr[i];
+        });
+    Kokkos::fence();
 
     std::chrono::steady_clock::time_point end =
         std::chrono::steady_clock::now();
@@ -280,9 +282,8 @@ void HignnModel::CloseDot(DeviceDoubleMatrix u, DeviceDoubleMatrix f, DeviceDoub
                         dataPtr[9 * (relativeOffset + index) + row * 3 + col] *
                         f(indexJStart + k, col);
                   Kokkos::atomic_add(&u(indexIStart + j, row), sum);
-                  if (computeDivM) {
-                    Kokkos::atomic_add(&divM(indexIStart + j, row), (double) divM_pairs_ptr[3 * (relativeOffset + index) + row]);
-                  }
+                  Kokkos::atomic_add(&divM(indexIStart + j, row),
+                                     (double)divMPairs(relativeOffset + index, row));
                   // Accumulate results to u and divM
                 }
               });
