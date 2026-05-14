@@ -217,10 +217,12 @@ void HignnModel::CloseDot(DeviceDoubleMatrix u, DeviceDoubleMatrix f, DeviceDoub
     auto resultTensor = mTwoBodyModel.forward(inputs).toTensor();
 
     DeviceFloatMatrix divMPairs("divMPairs", totalCoord, 3);
+    HostFloatMatrix hostDivMPairs("hostDivMPairs", totalCoord, 3);
     Kokkos::parallel_for(
-        Kokkos::RangePolicy<Kokkos::DefaultExecutionSpace>(0, totalCoord * 3),
-        KOKKOS_LAMBDA(const int i) {
-          divMPairs(i / 3, i % 3) = 0.0;
+        Kokkos::RangePolicy<Kokkos::DefaultHostExecutionSpace>(0,
+                                                               totalCoord * 3),
+        [&](const int i) {
+          hostDivMPairs(i / 3, i % 3) = 0.0;
         });
     Kokkos::fence();
 
@@ -229,8 +231,22 @@ void HignnModel::CloseDot(DeviceDoubleMatrix u, DeviceDoubleMatrix f, DeviceDoub
       const bool retainGraph = k < 8;
       auto grad = torch::autograd::grad({out}, {relativeCoordTensor}, {},
                                         retainGraph, false, false)[0]
+                      .detach()
+                      .to(torch::kCPU)
                       .contiguous();
+      auto gradPtr = grad.data_ptr<float>();
+      const int row = k / 3;
+      const int col = k % 3;
+
+      Kokkos::parallel_for(
+          Kokkos::RangePolicy<Kokkos::DefaultHostExecutionSpace>(0,
+                                                                 totalCoord),
+          [&](const int i) {
+            hostDivMPairs(i, row) += gradPtr[3 * i + col];
+          });
+      Kokkos::fence();
     }
+    Kokkos::deep_copy(divMPairs, hostDivMPairs);
 
     std::chrono::steady_clock::time_point end =
         std::chrono::steady_clock::now();
