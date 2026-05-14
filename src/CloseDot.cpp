@@ -234,16 +234,14 @@ void HignnModel::CloseDot(DeviceDoubleMatrix u, DeviceDoubleMatrix f, DeviceDoub
                       .detach()
                       .to(torch::kCPU)
                       .contiguous();
-
-      if (mMPIRank == 0) {
-        std::cout << "CloseDot grad k=" << k << " sizes=" << grad.sizes()
-                  << " numel=" << grad.numel()
-                  << " totalCoord=" << totalCoord
-                  << " device=" << grad.device()
-                  << " contiguous=" << grad.is_contiguous() << std::endl;
-      }
       if (grad.numel() != totalCoord * 3) {
         throw std::runtime_error("Unexpected CloseDot gradient size");
+      }
+      auto gradPtr = grad.data_ptr<float>();
+      const int row = k / 3;
+      const int col = k % 3;
+      for (int i = 0; i < totalCoord; i++) {
+        hostDivMPairs(i, row) += gradPtr[3 * i + col];
       }
     }
     Kokkos::deep_copy(divMPairs, hostDivMPairs);

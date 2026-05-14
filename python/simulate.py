@@ -148,7 +148,18 @@ def velocity_update(
 
     hignn_model.dot(velocity, force, divM)
 
-    velocity += divM  # TODO: add scale?
+    divM_scale = 1e-6
+    if rank == 0:
+        print(
+            "divM finite={finite}, min={min:.6e}, max={max:.6e}, norm={norm:.6e}, scale={scale:.1e}".format(
+                finite=np.isfinite(divM).all(),
+                min=np.nanmin(divM),
+                max=np.nanmax(divM),
+                norm=np.linalg.norm(divM),
+                scale=divM_scale,
+            )
+        )
+    velocity += divM_scale * divM
     return velocity
 
 
