@@ -224,6 +224,24 @@ void HignnModel::CloseDot(DeviceDoubleMatrix u, DeviceDoubleMatrix f, DeviceDoub
         });
     Kokkos::fence();
 
+    for (int k = 0; k < 9; k++) {
+      auto out = resultTensor.index({torch::indexing::Slice(), k}).sum();
+      const bool retainGraph = k < 8;
+      auto grad = torch::autograd::grad({out}, {relativeCoordTensor}, {},
+                                        retainGraph, false, false)[0]
+                      .contiguous();
+      auto gradPtr = grad.data_ptr<float>();
+      const int row = k / 3;
+      const int col = k % 3;
+
+      Kokkos::parallel_for(
+          Kokkos::RangePolicy<Kokkos::DefaultExecutionSpace>(0, totalCoord),
+          KOKKOS_LAMBDA(const int i) {
+            divMPairs(i, row) += gradPtr[3 * i + col];
+          });
+      Kokkos::fence();
+    }
+
     std::chrono::steady_clock::time_point end =
         std::chrono::steady_clock::now();
     queryDuration +=
