@@ -192,6 +192,33 @@ void HignnModel::CloseDot(DeviceDoubleMatrix u, DeviceDoubleMatrix f, DeviceDoub
         });
     Kokkos::fence();
 
+    const float minDivMRelativeDistance2 = 1e-12f;
+    DeviceIntVector validDivMPair("validDivMPair", totalCoord);
+    Kokkos::parallel_for(
+        Kokkos::RangePolicy<Kokkos::DefaultExecutionSpace>(0, totalCoord),
+        KOKKOS_LAMBDA(const int i) {
+          const float dx = relativeCoordPool(3 * i);
+          const float dy = relativeCoordPool(3 * i + 1);
+          const float dz = relativeCoordPool(3 * i + 2);
+          const float r2 = dx * dx + dy * dy + dz * dz;
+          validDivMPair(i) =
+              (isfinite(r2) && r2 > minDivMRelativeDistance2) ? 1 : 0;
+        });
+    Kokkos::fence();
+    auto hostValidDivMPair = Kokkos::create_mirror_view(validDivMPair);
+    Kokkos::deep_copy(hostValidDivMPair, validDivMPair);
+    int skippedNearFieldPairCount = 0;
+    for (int i = 0; i < totalCoord; i++) {
+      if (!hostValidDivMPair(i)) {
+        skippedNearFieldPairCount++;
+      }
+    }
+    if (skippedNearFieldPairCount > 0 && mMPIRank == 0) {
+      std::cout << "CloseDot skipped " << skippedNearFieldPairCount
+                << " near-zero relative-coordinate pairs for divM"
+                << std::endl;
+    }
+
     // prepare the inference model.
 #if USE_GPU
     auto options = torch::TensorOptions()
@@ -242,6 +269,9 @@ void HignnModel::CloseDot(DeviceDoubleMatrix u, DeviceDoubleMatrix f, DeviceDoub
       const int col = k % 3;
       int nonFiniteGradCount = 0;
       for (int i = 0; i < totalCoord; i++) {
+        if (!hostValidDivMPair(i)) {
+          continue;
+        }
         const float gradValue = gradPtr[3 * i + col];
         if (std::isfinite(gradValue)) {
           hostDivMPairs(i, row) += gradValue;
