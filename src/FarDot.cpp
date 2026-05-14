@@ -47,6 +47,13 @@ void HignnModel::FarDot(DeviceDoubleMatrix u, DeviceDoubleMatrix f, DeviceDouble
     std::cout << "start of FarDot" << std::endl;
   MPI_Barrier(MPI_COMM_WORLD);
 
+  const int farNodeSize = mFarMatIPtr->extent(0);
+  if (farNodeSize == 0) {
+    if (mMPIRank == 0)
+      std::cout << "End of far dot. No far pairs." << std::endl;
+    return;
+  }
+
   // Timing variables for profiling different parts of the algorithm.
   double queryDuration = 0.0;
   double dotDuration = 0.0;
