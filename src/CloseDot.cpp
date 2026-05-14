@@ -238,13 +238,9 @@ void HignnModel::CloseDot(DeviceDoubleMatrix u, DeviceDoubleMatrix f, DeviceDoub
       const int row = k / 3;
       const int col = k % 3;
 
-      Kokkos::parallel_for(
-          Kokkos::RangePolicy<Kokkos::DefaultHostExecutionSpace>(0,
-                                                                 totalCoord),
-          [&](const int i) {
-            hostDivMPairs(i, row) += gradPtr[3 * i + col];
-          });
-      Kokkos::fence();
+      for (int i = 0; i < totalCoord; i++) {
+        hostDivMPairs(i, row) += gradPtr[3 * i + col];
+      }
     }
     Kokkos::deep_copy(divMPairs, hostDivMPairs);
 
