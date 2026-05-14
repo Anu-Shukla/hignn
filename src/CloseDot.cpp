@@ -219,7 +219,9 @@ void HignnModel::CloseDot(DeviceDoubleMatrix u, DeviceDoubleMatrix f, DeviceDoub
     std::vector<torch::Tensor> grads;
     for (int k = 0; k < 9; k++) {
       auto out = resultTensor.index({torch::indexing::Slice(), k}).sum();
-      auto g = torch::autograd::grad({out}, {relativeCoordTensor}, {}, true, false, false)[0];
+      const bool retainGraph = k < 8;
+      auto g = torch::autograd::grad({out}, {relativeCoordTensor}, {},
+                                     retainGraph, false, false)[0];
       grads.push_back(g);
     }
 
@@ -238,7 +240,7 @@ void HignnModel::CloseDot(DeviceDoubleMatrix u, DeviceDoubleMatrix f, DeviceDoub
     begin = std::chrono::steady_clock::now();
 
     // Store contiguous version to keep tensor alive and ensure sequential layout.
-    auto resultTensor_contiguous = resultTensor.contiguous();
+    auto resultTensor_contiguous = resultTensor.detach().contiguous();
     auto dataPtr = resultTensor_contiguous.data_ptr<float>();
 
     Kokkos::parallel_for(

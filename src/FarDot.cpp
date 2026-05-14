@@ -724,7 +724,9 @@ void HignnModel::FarDot(DeviceDoubleMatrix u, DeviceDoubleMatrix f, DeviceDouble
       std::vector<torch::Tensor> grads;
       for (int k = 0; k < 9; k++) {
         auto out = resultTensor.index({torch::indexing::Slice(), k}).sum();
-        auto g = torch::autograd::grad({out}, {relativeCoordTensor}, {}, true, false, false)[0];
+        const bool retainGraph = k < 8;
+        auto g = torch::autograd::grad({out}, {relativeCoordTensor}, {},
+                                       retainGraph, false, false)[0];
         grads.push_back(g);
       }
 
