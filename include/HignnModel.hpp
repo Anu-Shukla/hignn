@@ -34,6 +34,7 @@
 #include <string>
 
 #include <torch/script.h>
+#include <torch/torch.h>
 
 using namespace std::chrono;
 
@@ -438,7 +439,7 @@ public:
    * @param fArray [in]  Input array (num_particles, 3) of forces acting on each
    * particle.
    */
-  void Dot(pybind11::array_t<float> &uArray, pybind11::array_t<float> &fArray);
+  void Dot(pybind11::array_t<float> &uArray, pybind11::array_t<float> &fArray, pybind11::array_t<float> &divMArray);
 
   /**
    * @brief Computes hydrodynamic interaction and update the velocities from the
