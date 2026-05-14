@@ -230,16 +230,6 @@ void HignnModel::CloseDot(DeviceDoubleMatrix u, DeviceDoubleMatrix f, DeviceDoub
       auto grad = torch::autograd::grad({out}, {relativeCoordTensor}, {},
                                         retainGraph, false, false)[0]
                       .contiguous();
-      auto gradPtr = grad.data_ptr<float>();
-      const int row = k / 3;
-      const int col = k % 3;
-
-      Kokkos::parallel_for(
-          Kokkos::RangePolicy<Kokkos::DefaultExecutionSpace>(0, totalCoord),
-          KOKKOS_LAMBDA(const int i) {
-            divMPairs(i, row) += gradPtr[3 * i + col];
-          });
-      Kokkos::fence();
     }
 
     std::chrono::steady_clock::time_point end =
