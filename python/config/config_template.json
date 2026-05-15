@@ -67,6 +67,20 @@
         "t_meas": 2,
         "_t_meas": "Measurement interval: how often (in time steps) to record output data",
 
+        "divm": {
+            "enabled": true,
+            "_enabled": "Whether to add the divM drift contribution to velocity",
+
+            "temperature": 300.0,
+            "_temperature": "Temperature in Kelvin used when scale is null",
+
+            "boltzmann_constant": 1.380649e-23,
+            "_boltzmann_constant": "Boltzmann constant used when scale is null",
+
+            "scale": null,
+            "_scale": "Override prefactor for divM; null uses boltzmann_constant * temperature"
+        },
+
         "_description": "Simulation configuration parameters"
     },
 

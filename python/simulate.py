@@ -90,7 +90,17 @@ def chain_tension(X, k_t, rest_length):
 
 
 def velocity_update(
-    hignn_model, t, position, b, n_filament, n_chain, rest_length, k_t, k_b
+    hignn_model,
+    t,
+    position,
+    b,
+    n_filament,
+    n_chain,
+    rest_length,
+    k_t,
+    k_b,
+    divm_enabled,
+    divm_scale,
 ):
     """
     Update the velocity of each particle based on external forces, chain tension, and bending forces.
@@ -148,8 +158,8 @@ def velocity_update(
 
     hignn_model.dot(velocity, force, divM)
 
-    divM_scale = 1e-6
-    velocity += divM_scale * divM
+    if divm_enabled:
+        velocity += divm_scale * divM
     return velocity
 
 
@@ -167,6 +177,16 @@ class Simulator:
         self.dt = simulation_params["dt"]  # Time step size
         self.t_max = simulation_params["t_max"]  # Total simulation time
         self.t_meas = simulation_params["t_meas"]  # Interval for outputting data
+        divm_params = simulation_params.get("divm", {})
+        self.divm_enabled = divm_params.get("enabled", True)
+        divm_scale = divm_params.get("scale")
+        if divm_scale is None:
+            temperature = divm_params.get("temperature", 300.0)
+            boltzmann_constant = divm_params.get(
+                "boltzmann_constant", 1.380649e-23
+            )
+            divm_scale = boltzmann_constant * temperature
+        self.divm_scale = divm_scale
 
         # Load cloud parameters from JSON
         cloud_params = config["cloud"]
@@ -295,6 +315,8 @@ class Simulator:
             self.rest_length,
             self.k_t,
             self.k_b,
+            self.divm_enabled,
+            self.divm_scale,
         )
 
         return V
