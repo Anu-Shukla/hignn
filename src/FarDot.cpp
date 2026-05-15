@@ -705,6 +705,22 @@ void HignnModel::FarDot(DeviceDoubleMatrix u, DeviceDoubleMatrix f, DeviceDouble
           });
       Kokkos::fence();
 
+      const float minDivMRelativeDistance2 = 1e-12f;
+      DeviceIntVector validQGradPair("validQGradPair", totalCoord);
+      Kokkos::parallel_for(
+          Kokkos::RangePolicy<Kokkos::DefaultExecutionSpace>(0, totalCoord),
+          KOKKOS_LAMBDA(const int i) {
+            const float dx = relativeCoordPool(3 * i);
+            const float dy = relativeCoordPool(3 * i + 1);
+            const float dz = relativeCoordPool(3 * i + 2);
+            const float r2 = dx * dx + dy * dy + dz * dz;
+            validQGradPair(i) =
+                (isfinite(r2) && r2 > minDivMRelativeDistance2) ? 1 : 0;
+          });
+      Kokkos::fence();
+      auto hostValidQGradPair = Kokkos::create_mirror_view(validQGradPair);
+      Kokkos::deep_copy(hostValidQGradPair, validQGradPair);
+
       // do inference for QMat
 #if USE_GPU
       auto options = torch::TensorOptions()
@@ -726,24 +742,43 @@ void HignnModel::FarDot(DeviceDoubleMatrix u, DeviceDoubleMatrix f, DeviceDouble
 
       auto resultTensor = mTwoBodyModel.forward(inputs).toTensor(); //NOTE: Q matrix computed here
 
-      std::vector<torch::Tensor> grads;
+      DeviceFloatMatrix qGradPairs("qGradPairs", totalCoord, 3);
+      auto hostQGradPairs = Kokkos::create_mirror_view(qGradPairs);
+      Kokkos::parallel_for(
+          Kokkos::RangePolicy<Kokkos::DefaultHostExecutionSpace>(
+              0, totalCoord * 3),
+          [&](const int i) { hostQGradPairs(i / 3, i % 3) = 0.0; });
+      Kokkos::fence();
+
       for (int k = 0; k < 9; k++) {
         auto out = resultTensor.index({torch::indexing::Slice(), k}).sum();
         const bool retainGraph = k < 8;
-        auto g = torch::autograd::grad({out}, {relativeCoordTensor}, {},
-                                       retainGraph, false, false)[0];
-        grads.push_back(g);
+        auto grad = torch::autograd::grad({out}, {relativeCoordTensor}, {},
+                                          retainGraph, false, false)[0]
+                        .detach()
+                        .to(torch::kCPU)
+                        .contiguous();
+        if (grad.numel() != totalCoord * 3) {
+          throw std::runtime_error("Unexpected FarDot Q gradient size");
+        }
+        auto gradPtr = grad.data_ptr<float>();
+        const int row = k / 3;
+        const int col = k % 3;
+        for (int i = 0; i < totalCoord; i++) {
+          if (!hostValidQGradPair(i)) {
+            continue;
+          }
+          const float gradValue = gradPtr[3 * i + col];
+          if (std::isfinite(gradValue)) {
+            hostQGradPairs(i, row) += gradValue;
+          }
+        }
       }
-
-      auto jacobian = torch::stack(grads,1);
-      auto J = jacobian.reshape({totalCoord, 3, 3, 3});
-      // .contiguous() ensures sequential memory layout before taking raw pointer.
-      auto qGrad = J.diagonal(0,2,3).sum(-1).contiguous();
-      auto qGradPtr = qGrad.data_ptr<float>();
+      Kokkos::deep_copy(qGradPairs, hostQGradPairs);
 
       Kokkos::parallel_for(
-        Kokkos::RangePolicy<Kokkos::DefaultExecutionSpace>(0, workNodeSize),
-        KOKKOS_LAMBDA(const int rank) {
+          Kokkos::RangePolicy<Kokkos::DefaultExecutionSpace>(0, workNodeSize),
+          KOKKOS_LAMBDA(const int rank) {
           const int nodeJ = mFarMatJ(workingNode(rank));
           const int indexJStart = mClusterTree(nodeJ, 2);
           const int indexJEnd = mClusterTree(nodeJ, 3);
@@ -757,17 +792,18 @@ void HignnModel::FarDot(DeviceDoubleMatrix u, DeviceDoubleMatrix f, DeviceDouble
           divMMiddlePool(poolOffset, 1) = 0.0;
           divMMiddlePool(poolOffset, 2) = 0.0;
 
-          for (int j = 0; j < workSizeJ; j++) {
-            for (int d = 0; d < 3; d++) {
-              divMMiddlePool(poolOffset, d) += qGradPtr[3 * (relativeOffset + j) + d];
+            for (int j = 0; j < workSizeJ; j++) {
+              for (int d = 0; d < 3; d++) {
+                divMMiddlePool(poolOffset, d) +=
+                    qGradPairs(relativeOffset + j, d);
+              }
             }
-          }
-        });
+          });
       Kokkos::fence(); 
 
       // copy result to QMat
       // Store contiguous version to keep tensor alive and ensure sequential layout.
-      auto resultTensor_contiguous_q = resultTensor.contiguous();
+      auto resultTensor_contiguous_q = resultTensor.detach().contiguous();
       auto dataPtr = resultTensor_contiguous_q.data_ptr<float>();
 
       // Copy Q matrix predictions into qMatPool, enforcing symmetry for
