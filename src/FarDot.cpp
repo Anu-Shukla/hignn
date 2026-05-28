@@ -88,6 +88,9 @@ void HignnModel::FarDot(DeviceDoubleMatrix u, DeviceDoubleMatrix f, DeviceDouble
   DeviceDoubleMatrix qMatPool("qMatPool", matPoolSize,
                               9);  // Pool for Q matrices.
   DeviceDoubleMatrix divMMiddlePool("divMMiddlePool", maxWorkNodeSize * maxIter, 3); // Pool for storing summed qGrad (B_k * 1) per node per iteration
+  DeviceDoubleMatrix cDivMMiddlePool("cDivMMiddlePool",
+                                     maxWorkNodeSize * maxIter,
+                                     3);
   DeviceDoubleVector middleMatPool(
       "middleMatPool",
       middleMatPoolSize * 3);  // Middle matrix pool for accumulation.
@@ -381,25 +384,103 @@ void HignnModel::FarDot(DeviceDoubleMatrix u, DeviceDoubleMatrix f, DeviceDouble
 #if USE_GPU
       auto options = torch::TensorOptions()
                          .dtype(torch::kFloat32)
-                         .device(torch::kCUDA, mCudaDevice)
-                         .requires_grad(true); //change to true
+                         .device(torch::kCUDA, mCudaDevice);
 #else
       auto options = torch::TensorOptions()
                          .dtype(torch::kFloat32)
-                         .device(torch::kCPU)
-                         .requires_grad(true); //change to true
+                         .device(torch::kCPU);
 #endif
       // .clone() makes PyTorch own a copy of the Kokkos buffer so it doesn't
       // hold a reference to memory Kokkos may reuse next iteration.
       torch::Tensor relativeCoordTensor =
-          torch::from_blob(relativeCoordPool.data(), {totalCoord, 3}, options).clone();
+          torch::from_blob(relativeCoordPool.data(), {totalCoord, 3}, options)
+              .clone()
+              .detach();
+      relativeCoordTensor.set_requires_grad(true);
+
       std::vector<c10::IValue> inputs;
       inputs.push_back(relativeCoordTensor);
 
+      torch::AutoGradMode enable_grad(true);
       auto resultTensor = mTwoBodyModel.forward(inputs).toTensor(); //NOTE: C matrix computed here
 
+      const float minDivMRelativeDistance2 = 1e-12f;
+      DeviceIntVector validCGradPair("validCGradPair", totalCoord);
+      Kokkos::parallel_for(
+          Kokkos::RangePolicy<Kokkos::DefaultExecutionSpace>(0, totalCoord),
+          KOKKOS_LAMBDA(const int i) {
+            const float dx = relativeCoordPool(3 * i);
+            const float dy = relativeCoordPool(3 * i + 1);
+            const float dz = relativeCoordPool(3 * i + 2);
+            const float r2 = dx * dx + dy * dy + dz * dz;
+            validCGradPair(i) =
+                (isfinite(r2) && r2 > minDivMRelativeDistance2) ? 1 : 0;
+          });
+      Kokkos::fence();
+      auto hostValidCGradPair = Kokkos::create_mirror_view(validCGradPair);
+      Kokkos::deep_copy(hostValidCGradPair, validCGradPair);
+
+      DeviceFloatMatrix cGradPairs("cGradPairs", totalCoord, 3);
+      auto hostCGradPairs = Kokkos::create_mirror_view(cGradPairs);
+      Kokkos::parallel_for(
+          Kokkos::RangePolicy<Kokkos::DefaultHostExecutionSpace>(
+              0, totalCoord * 3),
+          [&](const int i) { hostCGradPairs(i / 3, i % 3) = 0.0; });
+      Kokkos::fence();
+
+      for (int k = 0; k < 9; k++) {
+        auto out = resultTensor.index({torch::indexing::Slice(), k}).sum();
+        const bool retainGraph = k < 8;
+        auto grad = torch::autograd::grad({out}, {relativeCoordTensor}, {},
+                                          retainGraph, false, false)[0]
+                        .detach()
+                        .to(torch::kCPU)
+                        .contiguous();
+        if (grad.numel() != totalCoord * 3) {
+          throw std::runtime_error("Unexpected FarDot C gradient size");
+        }
+        auto gradPtr = grad.data_ptr<float>();
+        const int row = k / 3;
+        const int col = k % 3;
+        for (int i = 0; i < totalCoord; i++) {
+          if (!hostValidCGradPair(i)) {
+            continue;
+          }
+          const float gradValue = gradPtr[3 * i + row];
+          if (std::isfinite(gradValue)) {
+            hostCGradPairs(i, col) += gradValue;
+          }
+        }
+      }
+      Kokkos::deep_copy(cGradPairs, hostCGradPairs);
+
+      Kokkos::parallel_for(
+          Kokkos::RangePolicy<Kokkos::DefaultExecutionSpace>(0, workNodeSize),
+          KOKKOS_LAMBDA(const int rank) {
+            const int nodeI = mFarMatI(workingNode(rank));
+            const int indexIStart = mClusterTree(nodeI, 2);
+            const int indexIEnd = mClusterTree(nodeI, 3);
+            const int workSizeI = indexIEnd - indexIStart;
+
+            const int relativeOffset = relativeCoordOffset(rank);
+            const int iter = workingNodeIteration(rank);
+            const int poolOffset = rank * maxIter + iter;
+
+            cDivMMiddlePool(poolOffset, 0) = 0.0;
+            cDivMMiddlePool(poolOffset, 1) = 0.0;
+            cDivMMiddlePool(poolOffset, 2) = 0.0;
+
+            for (int j = 0; j < workSizeI; j++) {
+              for (int d = 0; d < 3; d++) {
+                cDivMMiddlePool(poolOffset, d) +=
+                    cGradPairs(relativeOffset + j, d);
+              }
+            }
+          });
+      Kokkos::fence();
+
       // Store contiguous version to keep tensor alive and ensure sequential layout.
-      auto resultTensor_contiguous = resultTensor.contiguous();
+      auto resultTensor_contiguous = resultTensor.detach().contiguous();
       auto dataPtr = resultTensor_contiguous.data_ptr<float>();
 
       // Fill cMatPool with model outputs, enforcing symmetry on non-diagonal
@@ -725,21 +806,24 @@ void HignnModel::FarDot(DeviceDoubleMatrix u, DeviceDoubleMatrix f, DeviceDouble
 #if USE_GPU
       auto options = torch::TensorOptions()
                          .dtype(torch::kFloat32)
-                         .device(torch::kCUDA, mCudaDevice)
-                         .requires_grad(true);
+                         .device(torch::kCUDA, mCudaDevice);
 #else
       auto options = torch::TensorOptions()
                          .dtype(torch::kFloat32)
-                         .device(torch::kCPU)
-                         .requires_grad(true);
+                         .device(torch::kCPU);
 #endif
       // .clone() makes PyTorch own a copy of the Kokkos buffer so autograd
       // doesn't hold a reference to memory Kokkos may reuse next iteration.
       torch::Tensor relativeCoordTensor =
-          torch::from_blob(relativeCoordPool.data(), {totalCoord, 3}, options).clone();
+          torch::from_blob(relativeCoordPool.data(), {totalCoord, 3}, options)
+              .clone()
+              .detach();
+      relativeCoordTensor.set_requires_grad(true);
+
       std::vector<c10::IValue> inputs;
       inputs.push_back(relativeCoordTensor);
 
+      torch::AutoGradMode enable_grad(true);
       auto resultTensor = mTwoBodyModel.forward(inputs).toTensor(); //NOTE: Q matrix computed here
 
       DeviceFloatMatrix qGradPairs("qGradPairs", totalCoord, 3);
@@ -785,7 +869,7 @@ void HignnModel::FarDot(DeviceDoubleMatrix u, DeviceDoubleMatrix f, DeviceDouble
           const int workSizeJ = indexJEnd - indexJStart;
 
           const int relativeOffset = relativeCoordOffset(rank);
-          const int iter = workingNodeIteration(rank) -1;
+          const int iter = workingNodeIteration(rank);
           const int poolOffset = rank * maxIter + iter;
 
           divMMiddlePool(poolOffset, 0) = 0.0;
@@ -1455,6 +1539,15 @@ void HignnModel::FarDot(DeviceDoubleMatrix u, DeviceDoubleMatrix f, DeviceDouble
 
                     // Atomic add to final solution vector
                     Kokkos::atomic_add(&u(indexJStart + index, row), sum);
+
+                    double divMSum = 0.0;
+                    const int cDivMPoolOffset = workingNodeRank * maxIter + iter;
+                    for (int k = 0; k < 3; k++) {
+                      divMSum += qMatPool(qMatOffset + index, row * 3 + k) *
+                                 cDivMMiddlePool(cDivMPoolOffset, k);
+                    }
+                    Kokkos::atomic_add(&divM(indexJStart + index, row),
+                                       -divMSum);
                   });
             });
         Kokkos::fence();
